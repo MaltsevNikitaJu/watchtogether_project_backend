@@ -2,6 +2,7 @@ import express, { Request, Response } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { Pool } from 'pg';
+import { createAuthRouter } from './routes/auth';
 
 
 dotenv.config();
@@ -29,6 +30,8 @@ async function checkDatabaseConnection() {
 
 app.use(cors());
 app.use(express.json());
+
+app.use('/api/auth',createAuthRouter(pool));
 
 app.get('/', (req: Request, res: Response) => {
     res.send('Сервер запущен');
