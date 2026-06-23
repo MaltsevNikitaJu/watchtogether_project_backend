@@ -2,14 +2,28 @@ import express, { Request, Response } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { Pool } from 'pg';
+import { createServer } from 'http';
+import { Server } from 'socket.io';
+
 import { createAuthRouter } from './routes/auth';
 import { createChatRoutes } from './routes/chats';
-
+import { initializeSocket } from './socket';
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+const httpServer = createServer(app);
+
+const io = new Server(httpServer, {
+    cors: {
+        origin: "*",
+        methods: ["GET", "POST"]
+    }
+});
+
+initializeSocket(io);
 
 const pool = new Pool({
     host: process.env.DB_HOST,
@@ -32,8 +46,8 @@ async function checkDatabaseConnection() {
 app.use(cors());
 app.use(express.json());
 
-app.use('/api/auth',createAuthRouter(pool));
-app.use('/api/chats',createChatRoutes(pool));
+app.use('/api/auth', createAuthRouter(pool));
+app.use('/api/chats', createChatRoutes(pool));
 
 app.get('/', (req: Request, res: Response) => {
     res.send('Сервер запущен');
@@ -41,6 +55,6 @@ app.get('/', (req: Request, res: Response) => {
 
 app.listen(PORT, async () => {
     console.log(`Сервер запущен на http://localhost:${PORT}`);
-    
+
     await checkDatabaseConnection();
 });
