@@ -23,8 +23,6 @@ const io = new Server(httpServer, {
     }
 });
 
-initializeSocket(io);
-
 const pool = new Pool({
     host: process.env.DB_HOST,
     port: Number(process.env.DB_PORT),
@@ -32,6 +30,8 @@ const pool = new Pool({
     password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME,
 });
+
+initializeSocket(io, pool);
 
 async function checkDatabaseConnection() {
     try {
@@ -53,7 +53,7 @@ app.get('/', (req: Request, res: Response) => {
     res.send('Сервер запущен');
 });
 
-app.listen(PORT, async () => {
+httpServer.listen(PORT, async () => {
     console.log(`Сервер запущен на http://localhost:${PORT}`);
 
     await checkDatabaseConnection();

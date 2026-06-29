@@ -102,5 +102,41 @@ export const createChatRoutes = (pool: Pool): Router => {
         }
     });
 
+    router.get("/:id/messages", async (req: any, res: Response) => {
+        const userId = req.user.userId;
+        const chatId = req.params.id;
+
+        try {
+            const accessCheck = await pool.query(
+                'SELECT 1 FROM chat_participants WHERE chat_id = $1 AND user_id = $2',
+                [chatId, userId]
+            )
+
+            if (accessCheck.rows.length === 0) {
+                return res.status(403).json ({
+                    message:'Нет доступа к сообщениям'
+                })
+            }
+
+            const result = await pool.query(
+                `SELECT m.id, m.content, m.created_at, m.type, u.username
+                FROM messages m
+                JOIN users u ON m.user_id = u.id
+                WHERE m.chat_id = $1
+                ORDER BY m.created_at ASC
+                LIMIT 50`, [chatId]
+            );
+
+            return res.status(200).json({
+                messages: result.rows
+            })
+        } catch (error) {
+            console.error('Ошибка получения сообщений:', error);
+            return res.status(500).json({
+                message: 'Ошибка сервера'
+            })
+        }
+    });
+
     return router;
 };
