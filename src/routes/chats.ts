@@ -1,14 +1,21 @@
-import { Router, Response } from "express";
+import { Router, Response, Request } from "express";
 import { Pool } from "pg";
 import { authMiddleware } from "../middleware/auth";
+
+interface AuthRequest extends Request {
+  user?: {
+    userId: number;
+    role: string;
+  };
+}
 
 export const createChatRoutes = (pool: Pool): Router => {
   const router = Router();
 
   router.use(authMiddleware);
 
-  router.post("/", async (req: any, res: Response) => {
-    const creatorId = req.user.userId;
+  router.post("/", async (req: AuthRequest, res: Response) => {
+    const creatorId = req.user!.userId;
     const { name, type } = req.body;
 
     if (!name) {
@@ -52,12 +59,13 @@ export const createChatRoutes = (pool: Pool): Router => {
     }
   });
 
-  router.get("/", async (req: any, res: Response) => {
-    const userId = req.user.userId;
+  router.get("/", async (req: AuthRequest, res: Response) => {
+    const userId = req.user?.userId;
+    if (!userId) return res.status(401).json({ message: "Не авторизован" });
 
     try {
       const result = await pool.query(
-        `SELECT c.id, c.name, c.type, c.video_url, c.created_at
+        `SELECT c.id, c.name, c.type, c.video_url, c.created_at, c.created_by
          FROM chats c
          INNER JOIN chat_participants cp ON c.id = cp.chat_id
          WHERE cp.user_id = $1
@@ -72,8 +80,9 @@ export const createChatRoutes = (pool: Pool): Router => {
     }
   });
 
-  router.get("/:id", async (req: any, res: Response) => {
-    const userId = req.user.userId;
+  router.get("/:id", async (req: AuthRequest, res: Response) => {
+    const userId = req.user?.userId;
+    if (!userId) return res.status(401).json({ message: "Не авторизован" });
     const chatId = req.params.id;
 
     try {
@@ -99,8 +108,9 @@ export const createChatRoutes = (pool: Pool): Router => {
     }
   });
 
-  router.get("/:id/messages", async (req: any, res: Response) => {
-    const userId = req.user.userId;
+  router.get("/:id/messages", async (req: AuthRequest, res: Response) => {
+    const userId = req.user?.userId;
+    if (!userId) return res.status(401).json({ message: "Не авторизован" });
     const chatId = req.params.id;
 
     try {
@@ -115,13 +125,18 @@ export const createChatRoutes = (pool: Pool): Router => {
         });
       }
 
+      await pool.query(
+        `DELETE FROM messages
+         WHERE type = 'watch_invitation'
+         AND created_at < NOW() - INTERVAL '7 days'`,
+      );
+
       const result = await pool.query(
-        `SELECT m.id, m.user_id, m.content, m.created_at, m.type, u.username
+        `SELECT m.id, m.user_id, m.content, m.created_at, m.type, m.video_url, u.username
          FROM messages m
          JOIN users u ON m.user_id = u.id
          WHERE m.chat_id = $1
-         ORDER BY m.created_at ASC
-         LIMIT 50`,
+         ORDER BY m.created_at ASC`,
         [chatId],
       );
 
@@ -136,9 +151,10 @@ export const createChatRoutes = (pool: Pool): Router => {
     }
   });
 
-  router.post("/:id/participants", async (req: any, res: Response) => {
+  router.post("/:id/participants", async (req: AuthRequest, res: Response) => {
     const chatId = req.params.id;
-    const requesterId = req.user.userId;
+    const requesterId = req.user?.userId;
+    if (!requesterId) return res.status(401).json({ message: "Не авторизован" });
     const { userId } = req.body;
 
     if (!userId) {
@@ -178,9 +194,10 @@ export const createChatRoutes = (pool: Pool): Router => {
     }
   });
 
-  router.get("/:id/participants", async (req: any, res: Response) => {
+  router.get("/:id/participants", async (req: AuthRequest, res: Response) => {
     const chatId = req.params.id;
-    const myId = req.user.userId;
+    const myId = req.user?.userId;
+    if (!myId) return res.status(401).json({ message: "Не авторизован" });
 
     try {
       const accessCheck = await pool.query(
@@ -192,9 +209,11 @@ export const createChatRoutes = (pool: Pool): Router => {
       }
 
       const result = await pool.query(
-        `SELECT u.id, u.username, u.avatar_url
+        `SELECT u.id, u.username, u.avatar_url,
+         CASE WHEN c.created_by = u.id THEN true ELSE false END as is_creator
          FROM users u
          JOIN chat_participants cp ON u.id = cp.user_id
+         JOIN chats c ON cp.chat_id = c.id
          WHERE cp.chat_id = $1`,
         [chatId],
       );
@@ -202,7 +221,62 @@ export const createChatRoutes = (pool: Pool): Router => {
       return res.status(200).json({ participants: result.rows });
     } catch (error) {
       console.error("Ошибка получения участников:", error);
+      return res.status(500).json({ message: "Ошибка серверера" });
+    }
+  });
+
+  router.delete("/:id/participants", async (req: AuthRequest, res: Response) => {
+    const chatId = req.params.id;
+    const userId = req.user?.userId;
+    if (!userId) return res.status(401).json({ message: "Не авторизован" });
+
+    const client = await pool.connect();
+
+    try {
+      await client.query("BEGIN");
+
+      const participantCheck = await client.query(
+        "SELECT 1 FROM chat_participants WHERE chat_id = $1 AND user_id = $2",
+        [chatId, userId],
+      );
+
+      if (participantCheck.rows.length === 0) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ message: "Вы не участник этого чата" });
+      }
+
+      await client.query(
+        "DELETE FROM chat_participants WHERE chat_id = $1 AND user_id = $2",
+        [chatId, userId],
+      );
+
+      const remainingParticipants = await client.query(
+        "SELECT COUNT(*) as count FROM chat_participants WHERE chat_id = $1",
+        [chatId],
+      );
+
+      const participantCount = parseInt(remainingParticipants.rows[0].count);
+
+      if (participantCount === 0) {
+        await client.query("DELETE FROM chats WHERE id = $1", [chatId]);
+        await client.query("COMMIT");
+        return res.status(200).json({
+          message: "Вы вышли из чата. Чат был удалён, так как в нём не осталось участников",
+          chatDeleted: true,
+        });
+      }
+
+      await client.query("COMMIT");
+      return res.status(200).json({
+        message: "Вы вышли из чата",
+        chatDeleted: false,
+      });
+    } catch (error) {
+      await client.query("ROLLBACK");
+      console.error("Ошибка выхода из чата:", error);
       return res.status(500).json({ message: "Ошибка сервера" });
+    } finally {
+      client.release();
     }
   });
 

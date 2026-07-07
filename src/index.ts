@@ -5,6 +5,7 @@ import { Pool } from "pg";
 import { createServer } from "http";
 import { Server } from "socket.io";
 import Redis from "ioredis";
+import path from "path";
 
 import { createAuthRouter } from "./routes/auth";
 import { createChatRoutes } from "./routes/chats";
@@ -20,7 +21,7 @@ const httpServer = createServer(app);
 
 const io = new Server(httpServer, {
   cors: {
-    origin: "*",
+    origin: process.env.FRONTEND_URL || "http://localhost:5173",
     methods: ["GET", "POST"],
   },
 });
@@ -31,6 +32,9 @@ const pool = new Pool({
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2000,
 });
 
 export const redisClient = new Redis(
@@ -38,11 +42,10 @@ export const redisClient = new Redis(
 );
 
 redisClient.on("connect", () => {
-  console.log("Подключен редис");
 });
 
 redisClient.on("error", (error) => {
-  console.log("Ошибка при подключении редиса", error);
+  console.error("Ошибка при подключении редиса", error);
 });
 
 initializeSocket(io, pool);
@@ -50,15 +53,23 @@ initializeSocket(io, pool);
 async function checkDatabaseConnection() {
   try {
     const client = await pool.connect();
-    console.log("Успешное подключение к бд");
     client.release();
   } catch (err) {
     console.error("Ошибка при подключении к бд", err);
   }
 }
 
-app.use(cors());
-app.use(express.json());
+app.use(cors({
+  origin: process.env.FRONTEND_URL || "http://localhost:5173",
+}));
+app.use(express.json({ limit: '1mb' }));
+
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
+  setHeaders: (res) => {
+    res.setHeader('Access-Control-Allow-Origin', process.env.FRONTEND_URL || "http://localhost:5173");
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  }
+}));
 
 app.use("/api/auth", createAuthRouter(pool));
 app.use("/api/chats", createChatRoutes(pool));
@@ -69,6 +80,6 @@ app.get("/", (req: Request, res: Response) => {
 });
 
 httpServer.listen(PORT, async () => {
-  console.log(`Сервер запущен на http://localhost:${PORT}`);
+  console.log(`Server running on http://localhost:${PORT}`);
   await checkDatabaseConnection();
 });

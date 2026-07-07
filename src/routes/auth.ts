@@ -6,6 +6,7 @@ import { authMiddleware } from "../middleware/auth";
 
 export const createAuthRouter = (pool: Pool): Router => {
   const router = Router();
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
   router.post("/register", async (req: Request, res: Response) => {
     const { username, email, password } = req.body;
@@ -14,6 +15,18 @@ export const createAuthRouter = (pool: Pool): Router => {
       return res
         .status(400)
         .json({ message: "Все поля обязательны для заполнения" });
+    }
+
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ message: "Некорректный формат email" });
+    }
+
+    if (username.length < 3 || username.length > 30) {
+      return res.status(400).json({ message: "Имя пользователя должно быть от 3 до 30 символов" });
+    }
+
+    if (password.length < 8 || password.length > 100) {
+      return res.status(400).json({ message: "Пароль должен быть от 8 до 100 символов" });
     }
     try {
       const checkUser = await pool.query(
@@ -59,6 +72,10 @@ export const createAuthRouter = (pool: Pool): Router => {
       return res
         .status(400)
         .json({ message: "Поля обязательны для заполнения" });
+    }
+    
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ message: "Некорректный формат email" });
     }
 
     try {
@@ -111,7 +128,10 @@ export const createAuthRouter = (pool: Pool): Router => {
 
   router.get("/me", authMiddleware, async (req: Request, res: Response) => {
     try {
-      const userId = req.user!.userId;
+      const userId = req.user?.userId;
+      if (!userId) {
+        return res.status(401).json({ message: "Не авторизован" });
+      }
 
       const result = await pool.query(
         "SELECT id, username, email, role, avatar_url, created_at FROM users WHERE id = $1",
