@@ -10,6 +10,10 @@ import path from "path";
 import { createAuthRouter } from "./routes/auth";
 import { createChatRoutes } from "./routes/chats";
 import { createUserRoutes } from "./routes/users";
+import { createSubscriptionRoutes } from "./routes/subscriptions";
+import { createYandexAuthRouter } from "./routes/oauth";
+import { createVideosRouter } from "./routes/videos";
+import { createCatalogRouter } from "./routes/catalog";
 import { initializeSocket } from "./socket";
 
 dotenv.config();
@@ -72,8 +76,12 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
 }));
 
 app.use("/api/auth", createAuthRouter(pool));
+app.use("/api/auth", createYandexAuthRouter(pool));
 app.use("/api/chats", createChatRoutes(pool));
 app.use("/api/users", createUserRoutes(pool));
+app.use("/api/subscriptions", createSubscriptionRoutes(pool));
+app.use("/api/videos", createVideosRouter(pool));
+app.use("/api/catalog", createCatalogRouter(pool));
 
 app.get("/", (req: Request, res: Response) => {
   res.send("Сервер запущен");

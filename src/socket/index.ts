@@ -2,6 +2,7 @@ import { Server, Socket } from "socket.io";
 import { Pool } from "pg";
 import jwt from "jsonwebtoken";
 import { redisClient } from "../index";
+import { setIo, registerUserSocket, unregisterUserSocket } from "./notify";
 
 declare module "socket.io" {
   interface Socket {
@@ -13,6 +14,7 @@ declare module "socket.io" {
 }
 
 export const initializeSocket = (io: Server, pool: Pool) => {
+  setIo(io);
   const onlineUsersPerChat = new Map<string, Set<number>>();
 
   setInterval(() => {
@@ -76,6 +78,11 @@ export const initializeSocket = (io: Server, pool: Pool) => {
       socket.disconnect(true);
       return;
     }
+
+    registerUserSocket(socket.user.userId, socket.id);
+    socket.on("disconnect", () => {
+      unregisterUserSocket(socket.user?.userId ?? 0, socket.id);
+    });
 
     socket.on("join_chat", async (chatId: string) => {
       const userId = socket.user?.userId;
@@ -162,6 +169,15 @@ export const initializeSocket = (io: Server, pool: Pool) => {
       }
 
       try {
+        const accessCheck = await pool.query(
+          "SELECT 1 FROM chat_participants WHERE chat_id = $1 AND user_id = $2",
+          [chatId, userId],
+        );
+        if (accessCheck.rows.length === 0) {
+          socket.emit("error", { message: "Нет доступа к этому чату" });
+          return;
+        }
+
         const result = await pool.query(
           "INSERT INTO messages (chat_id, user_id, content, type) VALUES ($1, $2, $3, $4) RETURNING id, content, created_at",
           [chatId, userId, content, "text"],
@@ -169,18 +185,20 @@ export const initializeSocket = (io: Server, pool: Pool) => {
 
         const savedMessage = result.rows[0];
         const userResult = await pool.query(
-          "SELECT username FROM users WHERE id = $1",
+          "SELECT username, avatar_url FROM users WHERE id = $1",
           [userId],
         );
-        const username = userResult.rows[0].username;
+        const author = userResult.rows[0];
 
         const messagePayload = {
-          id: savedMessage,
-          chatId: chatId,
-          userId: userId,
-          username: username,
+          id: savedMessage.id,
+          chat_id: chatId,
+          user_id: userId,
+          username: author.username,
+          avatar_url: author.avatar_url,
           content: savedMessage.content,
           created_at: savedMessage.created_at,
+          type: "text",
         };
 
         io.in(`chat_${chatId}`).emit("receive_message", messagePayload);
@@ -195,10 +213,31 @@ export const initializeSocket = (io: Server, pool: Pool) => {
 
       if (!userId || !chatId) return;
 
-      const payload = { action, time, userId };
-      socket.to(`chat_${chatId}`).emit("sync_video", payload);
-
       try {
+        const accessCheck = await pool.query(
+          "SELECT 1 FROM chat_participants WHERE chat_id = $1 AND user_id = $2",
+          [chatId, userId],
+        );
+        if (accessCheck.rows.length === 0) {
+          socket.emit("error", { message: "Нет доступа к этому чату" });
+          return;
+        }
+
+        const chatRow = await pool.query(
+          "SELECT created_by, host_only_controls FROM chats WHERE id = $1",
+          [chatId],
+        );
+        if (chatRow.rows.length > 0) {
+          const chat = chatRow.rows[0];
+          if (chat.host_only_controls && chat.created_by !== userId) {
+            socket.emit("error", { message: "Управление видео доступно только ведущему" });
+            return;
+          }
+        }
+
+        const payload = { action, time, userId };
+        socket.to(`chat_${chatId}`).emit("sync_video", payload);
+
         await redisClient.set(
           `room:${chatId}:video_state`,
           JSON.stringify({ action, time }),
@@ -236,8 +275,8 @@ export const initializeSocket = (io: Server, pool: Pool) => {
 
             const systemMessagePayload = {
               id: messageResult.rows[0].id,
-              chatId,
-              userId,
+              chat_id: chatId,
+              user_id: userId,
               username,
               content: systemMessage,
               created_at: messageResult.rows[0].created_at,
@@ -280,13 +319,13 @@ export const initializeSocket = (io: Server, pool: Pool) => {
 
         const invitationMessage = {
           id: messageResult.rows[0].id,
-          chatId,
-          userId,
+          chat_id: chatId,
+          user_id: userId,
           username,
           content: `🎬 ${username} приглашает вас посмотреть видео вместе!`,
           created_at: messageResult.rows[0].created_at,
           type: "watch_invitation",
-          videoUrl,
+          video_url: videoUrl,
         };
 
         io.in(`chat_${chatId}`).emit("receive_message", invitationMessage);
@@ -301,6 +340,62 @@ export const initializeSocket = (io: Server, pool: Pool) => {
         console.error("Ошибка при отправке приглашения:", err);
         socket.emit("error", { message: "Ошибка при отправке приглашения" });
       }
+    });
+
+    socket.on("chat_settings_changed", async (data: { chatId: string; host_only_controls: boolean }) => {
+      const { chatId, host_only_controls } = data;
+      const userId = socket.user?.userId;
+      if (!userId || !chatId) return;
+
+      try {
+        const chatResult = await pool.query("SELECT created_by FROM chats WHERE id = $1", [chatId]);
+        if (chatResult.rows.length === 0) return;
+        if (chatResult.rows[0].created_by !== userId) {
+          socket.emit("error", { message: "Только создатель может менять настройки чата" });
+          return;
+        }
+
+        io.in(`chat_${chatId}`).emit("chat_settings_updated", { chatId, host_only_controls });
+
+        const userResult = await pool.query("SELECT username FROM users WHERE id = $1", [userId]);
+        const username = userResult.rows[0]?.username;
+        if (username) {
+          const systemMessage = host_only_controls
+            ? `${username} включил режим «только ведущий»`
+            : `${username} выключил режим «только ведущий»`;
+
+          const messageResult = await pool.query(
+            "INSERT INTO messages (chat_id, user_id, content, type) VALUES ($1, $2, $3, $4) RETURNING id, created_at",
+            [chatId, userId, systemMessage, "system"],
+          );
+
+          io.in(`chat_${chatId}`).emit("receive_message", {
+            id: messageResult.rows[0].id,
+            chat_id: chatId,
+            user_id: userId,
+            username,
+            content: systemMessage,
+            created_at: messageResult.rows[0].created_at,
+            type: "system",
+          });
+        }
+      } catch (err) {
+        console.error("Ошибка обновления настроек чата:", err);
+      }
+    });
+
+    socket.on("send_reaction", async (data: { chatId: string; emoji: string }) => {
+      const { chatId, emoji } = data;
+      const userId = socket.user?.userId;
+      if (!userId || !chatId || !emoji) return;
+      try {
+        const accessCheck = await pool.query(
+          "SELECT 1 FROM chat_participants WHERE chat_id = $1 AND user_id = $2",
+          [chatId, userId],
+        );
+        if (accessCheck.rows.length === 0) return;
+        socket.to(`chat_${chatId}`).emit("reaction", { emoji });
+      } catch {}
     });
   });
 };

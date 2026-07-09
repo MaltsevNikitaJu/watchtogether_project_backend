@@ -1,6 +1,8 @@
 import { Router, Response, Request } from "express";
 import { Pool } from "pg";
 import { authMiddleware } from "../middleware/auth";
+import { invalidateUser } from "../socket/notify";
+import { expireIfNeeded } from "../middleware/premium";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
@@ -89,79 +91,54 @@ export const createUserRoutes = (pool: Pool): Router => {
     if (!requesterId) return res.status(401).json({ message: "Не авторизован" });
 
     const { addresseeId } = req.body;
-
     if (!addresseeId) {
       return res.status(400).json({ message: "Укажите ID пользователя" });
     }
 
+    const client = await pool.connect();
     try {
-      const existingRequest = await pool.query(
-        `SELECT id, status, requester_id FROM friendships
+      await client.query("BEGIN");
+
+      const existing = await client.query(
+        `SELECT id, status FROM friendships
          WHERE (requester_id = $1 AND addressee_id = $2)
-            OR (requester_id = $2 AND addressee_id = $1)`,
+            OR (requester_id = $2 AND addressee_id = $1)
+         FOR UPDATE`,
         [requesterId, addresseeId],
       );
 
-      if (existingRequest.rows.length > 0) {
-        const relation = existingRequest.rows[0];
-
+      if (existing.rows.length > 0) {
+        const relation = existing.rows[0];
         if (relation.status === "pending") {
-          return res
-            .status(409)
-            .json({
-              message: "Заявка уже отправлена или ожидает вашего ответа",
-            });
+          await client.query("ROLLBACK");
+          return res.status(409).json({ message: "Заявка уже отправлена или ожидает вашего ответа" });
         }
         if (relation.status === "accepted") {
+          await client.query("ROLLBACK");
           return res.status(409).json({ message: "Вы уже друзья" });
         }
-        if (relation.status === "rejected") {
-          return res
-            .status(409)
-            .json({ message: "Заявка была отклонена ранее" });
-        }
-      }
-
-      const client = await pool.connect();
-      try {
-        await client.query("BEGIN");
-
-        const doubleCheck = await client.query(
-          `SELECT id, status FROM friendships
-           WHERE (requester_id = $1 AND addressee_id = $2)
-              OR (requester_id = $2 AND addressee_id = $1)
-           FOR UPDATE`,
-          [requesterId, addresseeId],
-        );
-
-        if (doubleCheck.rows.length > 0) {
-          await client.query("ROLLBACK");
-          const relation = doubleCheck.rows[0];
-          if (relation.status === "pending") {
-            return res.status(409).json({ message: "Заявка уже отправлена или ожидает вашего ответа" });
-          }
-          if (relation.status === "accepted") {
-            return res.status(409).json({ message: "Вы уже друзья" });
-          }
-          return res.status(409).json({ message: "Заявка была отклонена ранее" });
-        }
-
         await client.query(
-          "INSERT INTO friendships (requester_id, addressee_id, status) VALUES ($1, $2, $3)",
-          [requesterId, addresseeId, "pending"],
+          "UPDATE friendships SET requester_id = $1, addressee_id = $2, status = $3 WHERE id = $4",
+          [requesterId, addresseeId, "pending", relation.id],
         );
         await client.query("COMMIT");
-
+        invalidateUser(addresseeId, ["Friends"]);
         return res.status(201).json({ message: "Заявка в друзья отправлена" });
-      } catch (error) {
-        await client.query("ROLLBACK");
-        throw error;
-      } finally {
-        client.release();
       }
+
+      await client.query(
+        "INSERT INTO friendships (requester_id, addressee_id, status) VALUES ($1, $2, $3)",
+        [requesterId, addresseeId, "pending"],
+      );
+      await client.query("COMMIT");
+      invalidateUser(addresseeId, ["Friends"]);
+      return res.status(201).json({ message: "Заявка в друзья отправлена" });
     } catch (error) {
+      await client.query("ROLLBACK");
       console.error("Ошибка отправки заявки:", error);
       return res.status(500).json({ message: "Ошибка сервера" });
+    } finally {
+      client.release();
     }
   });
 
@@ -211,6 +188,7 @@ export const createUserRoutes = (pool: Pool): Router => {
           action === "accept"
             ? "Заявка принята. Вы теперь друзья!"
             : "Заявка отклонена";
+        invalidateUser(request.requester_id, ["Friends"]);
         return res.status(200).json({ message });
       } catch (error) {
         console.error("Ошибка обработки заявки:", error);
@@ -274,13 +252,40 @@ export const createUserRoutes = (pool: Pool): Router => {
     }
   });
 
+  router.delete("/friends/:id", async (req: AuthRequest, res: Response) => {
+    const myId = req.user?.userId;
+    if (!myId) return res.status(401).json({ message: "Не авторизован" });
+    const otherId = Number(req.params.id);
+    if (!otherId) return res.status(400).json({ message: "Некорректный ID" });
+
+    try {
+      const result = await pool.query(
+        `DELETE FROM friendships
+         WHERE status = 'accepted'
+           AND ((requester_id = $1 AND addressee_id = $2)
+             OR (requester_id = $2 AND addressee_id = $1))
+         RETURNING id`,
+        [myId, otherId],
+      );
+      if (result.rows.length === 0) {
+        return res.status(404).json({ message: "Друг не найден" });
+      }
+      invalidateUser(otherId, ["Friends"]);
+      return res.status(200).json({ message: "Удалён из друзей" });
+    } catch (error) {
+      console.error("Ошибка удаления друга:", error);
+      return res.status(500).json({ message: "Ошибка сервера" });
+    }
+  });
+
   router.get("/me", async (req: AuthRequest, res: Response) => {
     const myId = req.user?.userId;
     if (!myId) return res.status(401).json({ message: "Не авторизован" });
 
     try {
+      await expireIfNeeded(pool, myId);
       const result = await pool.query(
-        "SELECT id, username, email, avatar_url, created_at FROM users WHERE id = $1",
+        "SELECT id, username, email, avatar_url, role, created_at FROM users WHERE id = $1",
         [myId],
       );
 
@@ -303,6 +308,13 @@ export const createUserRoutes = (pool: Pool): Router => {
 
     try {
       if (username) {
+        if (username.length < 3 || username.length > 30) {
+          return res.status(400).json({ message: "Имя пользователя должно быть от 3 до 30 символов" });
+        }
+        if (!/^[a-zA-Z0-9_-]+$/.test(username)) {
+          return res.status(400).json({ message: "Только буквы, цифры, дефис и подчеркивание" });
+        }
+
         const existingUser = await pool.query(
           "SELECT id FROM users WHERE username = $1 AND id != $2",
           [username, myId],

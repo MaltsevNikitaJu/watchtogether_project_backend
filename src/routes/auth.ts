@@ -89,6 +89,12 @@ export const createAuthRouter = (pool: Pool): Router => {
 
       const user = result.rows[0];
 
+      if (!user.password_hash) {
+        return res
+          .status(401)
+          .json({ message: "Этот аккаунт создан через Яндекс. Войдите через кнопку «Яндекс»" });
+      }
+
       const passwordMatch = await bcrypt.compare(password, user.password_hash);
 
       if (!passwordMatch) {
