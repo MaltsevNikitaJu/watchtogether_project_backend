@@ -293,11 +293,11 @@ sequenceDiagram
     participant NM as notify (userId→socket)
     participant B as Юля (фронт)
 
-    A->>BE: POST /users/friend-request {addresseeId: Юля}
+    A->>BE: POST /friend-request (addresseeId = Юля)
     BE->>BE: INSERT friendship (pending)
-    BE->>NM: invalidateUser(Юля, ['Friends'])
-    NM-->>B: cache_invalidated {tags:['Friends']}
-    B->>B: dispatch(invalidateTags(['Friends']))
+    BE->>NM: invalidateUser(Юля, тег Friends)
+    NM-->>B: cache_invalidated (тег Friends)
+    B->>B: dispatch invalidateTags(Friends)
     B->>BE: GET /users/friend-requests (refetch)
     BE-->>B: заявка от Анны
 ```
@@ -334,7 +334,7 @@ sequenceDiagram
     WS->>RDS: room:chatId:video_state = {pause, time} (TTL 24h)
     par рассылка остальным
         WS-->>FY: sync_video {action:"pause", time, userId}
-        FY->>FY: player.currentTime(time); player.pause()
+        FY->>FY: player.currentTime(time) + pause
     end
     WS->>PG: INSERT system message «Анна поставил видео на паузу»
     WS-->>FY: receive_message (system)
@@ -375,7 +375,7 @@ sequenceDiagram
     Y-->>BE: access_token
     BE->>YI: GET /info  (Authorization: OAuth access_token)
     YI-->>BE: {id, login, default_email, default_avatar_id}
-    BE->>DB: find-or-create по yandex_id / email; скачать аватар
+    BE->>DB: find-or-create по yandex_id или email, скачать аватар
     BE->>BE: jwt.sign({userId, role}, 24h)
     BE-->>FE: 302 /oauth/success?token=<jwt>
     FE->>FE: saveToken → /chats
@@ -400,7 +400,7 @@ sequenceDiagram
 
     U->>FE: выбрать план → «Оплатить»
     FE->>BE: POST /create-payment {plan}
-    BE->>YK: POST /v3/payments\n(Idempotence-Key, Basic shopId:secret,\nconfirmation=redirect, return_url)
+    BE->>YK: POST /v3/payments (Idempotence-Key, Basic shopId:secret, redirect)
     YK-->>BE: {id, status:"pending", confirmation.confirmation_url}
     BE->>DB: INSERT payments (pending)
     BE-->>FE: {confirmation_url}
@@ -411,7 +411,7 @@ sequenceDiagram
     BE->>YK: GET /v3/payments/{id}
     YK-->>BE: {status}
     alt status = succeeded
-        BE->>DB: payments → succeeded (атомарно);\nактивировать подписку (plan, даты, role)
+        BE->>DB: payments → succeeded, активировать подписку
     end
     BE-->>FE: {status, plan}
 ```
